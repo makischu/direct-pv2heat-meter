@@ -115,14 +115,15 @@ plt.show()
 
      
 # so we can state:
-def moduleI(U,TC,E=800):
+def moduleI(U,TC=42.5,E=800):
     polyIOs = [ 1.87942600e-20, -4.86961403e-19 , 1.17433360e-16 , 2.68834696e-15,
        1.81678067e-13,  5.95891947e-12,  1.31406079e-10 , 1.85584490e-09,
        1.21572220e-08]
     IL = 0.00536952652515192*TC + 9.191799383372592
     I0 = np.polyval(polyIOs,TC)
     b  = 8.84231653091366e-06*TC*TC + -0.002355382115251495*TC + 0.4725462916388404
-    I  = IL*E/800 - I0*np.exp(b*U)
+    ILE = IL*E/800
+    I  = ILE - I0*np.exp(b*U)
     return I
 
 
@@ -163,4 +164,123 @@ plt.xlim((0,45))
 plt.ylim((0,12))
 plt.grid()
 plt.show()
+
+
+
+
+#illustration of multiple modules
+f, axs = plt.subplots(1,2)
+R = 35.33
+Is = Us/R
+axs[0].plot(6*Us, 6*Is, 'k', label='load')
+axs[0].plot(6*Us, moduleI(Us), 'r', label='6 modules in series')
+axs[0].plot(3*Us, 2*moduleI(Us), 'b--', label='2x 3modules in parallel')
+axs[0].legend()
+axs[0].set_xlabel("U [V]")
+axs[0].set_ylabel("I [A]")
+axs[0].set_xlim((0,250))
+axs[0].set_ylim((0,20))
+axs[0].grid()
+axs[0].title.set_text("sunny (E=800)")
+axs[1].plot(6*Us, 6*Is, 'k', label='load')
+Elow = 100
+axs[1].plot(6*Us, moduleI(Us,E=Elow), 'r--', label='6 modules in series')
+axs[1].plot(3*Us, 2*moduleI(Us,E=Elow), 'b', label='2x 3modules in parallel')
+axs[1].legend()
+axs[1].set_xlabel("U [V]")
+axs[1].set_ylabel("I [A]")
+axs[1].set_xlim((0,250))
+axs[1].set_ylim((0,20))
+axs[1].title.set_text("cloudy (E=100)")
+axs[1].grid()
+plt.show()
+
+
+
+#helper for the following
+def moduleIcoeffs(TC=42.5,E=800):
+    polyIOs = [ 1.87942600e-20, -4.86961403e-19 , 1.17433360e-16 , 2.68834696e-15,
+       1.81678067e-13,  5.95891947e-12,  1.31406079e-10 , 1.85584490e-09,
+       1.21572220e-08]
+    IL = 0.00536952652515192*TC + 9.191799383372592
+    I0 = np.polyval(polyIOs,TC)
+    b  = 8.84231653091366e-06*TC*TC + -0.002355382115251495*TC + 0.4725462916388404
+    ILE = IL*E/800
+    return ILE, I0, b
+
+#efficiency evaluation
+Es = np.linspace(1,1000,1000)
+T = 30
+Pmpps = np.zeros(np.size(Es))
+Ppars = np.zeros(np.size(Es))
+Psers = np.zeros(np.size(Es))
+for i in range(0,len(Es)):
+    E = Es[i]
+    
+    #ermittle umpp & impp
+    ILE, I0, b = moduleIcoeffs(TC=T,E=E)
+    def dPdU(vars):
+        U = vars
+        eq = 1* (ILE - I0*np.exp(b*U) ) + U* (-I0*np.exp(b*U)*b )
+        return eq
+    Umpp =  fsolve(dPdU, 30)
+    Impp = moduleI(Umpp, TC=T,E=E)
+    Pmpp = 6*Umpp*Impp
+    Pmpps[i] = Pmpp
+    
+    #ermittle schnittpunkt für seriell
+    ILE, I0, b = moduleIcoeffs(TC=T,E=E)
+    nI = 1
+    nU = 6
+    def fI(vars):
+        U = vars
+        eq = nI* (ILE - I0*np.exp(b*U/nU)) - U/R
+        return eq
+    User =  fsolve(fI, nU*Umpp)
+    Iser = nI*moduleI(User/nU, TC=T,E=E)
+    Pser = User*Iser
+    Psers[i] = Pser
+    
+    #ermittle schnittpunkt für parallel
+    ILE, I0, b = moduleIcoeffs(TC=T,E=E)
+    nI = 2
+    nU = 3
+    def fI(vars):
+        U = vars
+        eq = nI* (ILE - I0*np.exp(b*U/nU)) - U/R
+        return eq
+    Upar =  fsolve(fI, nU*Umpp)
+    Ipar = nI*moduleI(Upar/nU, TC=T,E=E)
+    Ppar = Upar*Ipar
+    Ppars[i] = Ppar
+    
+
+f, axs = plt.subplots(2,1)
+Pheats = 1500*np.ones(np.size(Pmpps))
+Pmpps2 = np.minimum(Pmpps,Pheats)
+axs[0].plot(Es, Pmpps2, 'g--', label='at MPP, load limited')
+axs[0].plot(Es, Pmpps, 'g', label='at MPP')
+axs[0].plot(Es, Psers, 'r', label='at serial')
+axs[0].plot(Es, Ppars, 'b', label='at parallel')
+axs[0].legend()
+axs[0].set_xlabel("E")
+axs[0].set_ylabel("P")
+axs[0].grid()
+Pmaxs = np.maximum(Ppars,Psers)
+Effs1 = Psers / Pmpps
+Effs2 = Ppars / Pmpps
+Effs3 = Pmaxs / Pmpps
+Effs4 = Pmaxs / Pmpps2
+axs[1].plot(Es, Effs1*100, 'r--', label='serial instead',linewidth=0.5)
+axs[1].plot(Es, Effs2*100, 'b--', label='parallel instead',linewidth=0.5)
+axs[1].plot(Es, Effs4*100, 'm--', label='load-limited max', linewidth=3)
+axs[1].plot(Es, Effs3*100, 'm', label='max', linewidth=3)
+axs[1].set_xlabel("E")
+axs[1].set_ylabel("Efficiency [%]")
+axs[1].set_ylim((0,110))
+axs[1].legend()
+axs[1].grid()
+plt.show()
+
+
 
