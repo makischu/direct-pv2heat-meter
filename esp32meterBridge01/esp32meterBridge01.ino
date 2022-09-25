@@ -7,11 +7,15 @@
 #include "WiFi.h"
 #include "AsyncUDP.h"
 #include "BLEDevice.h"
+//For Watchdog example see https://iotassistant.io/esp32/enable-hardware-watchdog-timer-esp32-arduino-ide/
+#include <esp_task_wdt.h>
+
+#define WDT_TIMEOUT 10
 
 const char * ssid = "****";
 const char * password = "****";
 IPAddress ip (192, 168, *, 38);
-//IPAddress dns(192, 168, 2, 1);   
+//IPAddress dns(192, 168, *, 1);   
 IPAddress gw (192, 168, *, 1);   
 IPAddress sub(255, 255, 255, 0);
 IPAddress remoteIP;
@@ -21,6 +25,14 @@ unsigned long previousMillis = 0;
 unsigned long interval = 10000;
 unsigned long nrWifiConnects = 0;
 unsigned long nrBLEConnects = 0;
+unsigned long tLastBLENotify=0;
+
+
+
+
+#define LED_PWR       (2)
+#define LED_BT        (5)
+#define LED_WIFI      (13)
 
 
 #define SERVICE_UUID                "58fad6cc-53b4-4dfd-ad3f-2072af1bbf2c"
@@ -37,6 +49,36 @@ static BLERemoteCharacteristic* pRemoteCharacteristicCmd=0;
 static BLEClient*               pClient =0;
 long rssi_ble = -127;
 
+
+uint8_t bleCmd[4];
+bool    bleCmdPending=0;
+
+uint8_t bleStatus[32];
+size_t  bleStatusLen=0;
+bool    bleStatusNew=0;
+unsigned long tLastBLEStatusNotify=0;
+
+bool scanActive=false;
+
+void sendUDPStatus() {
+    uint8_t data[64]; uint8_t* pD = data;
+    long rssi_wifi = WiFi.RSSI();
+    //long rssi_ble  = pRemoteDevice ? pRemoteDevice->getRSSI() : -127;   returns always the same, maybe from the time of scan.
+    //long rssi_ble = pClient ? pClient->getRssi() : -127; // with this line sth stopped working... so tried same in loop.
+    rssi_ble = pClient ? pClient->getRssi() : -127; //try again... now called from main loop
+    uint32_t mills = millis();
+    memcpy(pD,"RCVD",4); pD+=4;
+    memcpy(pD,bleStatus,bleStatusLen); pD+=bleStatusLen;
+    *(pD++) = (uint8_t)(rssi_wifi&0xFF);
+    *(pD++) = (uint8_t)(rssi_ble&0xFF);
+    *(pD++) = (uint8_t)(nrWifiConnects&0xFF);
+    *(pD++) = (uint8_t)(nrBLEConnects&0xFF);
+    memcpy(pD,&mills,4); pD+=4;
+    size_t res = udp.writeTo(data, pD-data, remoteIP, remotePort);
+    //Serial.print("UDP writeTo returned ");
+    //Serial.println(res);
+}
+
 static void notifyCallback(
   BLERemoteCharacteristic* pBLERemoteCharacteristic,
   uint8_t* pData,
@@ -49,23 +91,12 @@ static void notifyCallback(
 //    Serial.print("data: ");
 //    Serial.println((char*)pData);
 
-    //UDP paket verpacken.
-    if (remotePort != 0 && length < 32) {
-        uint8_t data[64]; uint8_t* pD = data;
-        long rssi_wifi = WiFi.RSSI();
-        //long rssi_ble  = pRemoteDevice ? pRemoteDevice->getRSSI() : -127;   returns always the same, maybe from the time of scan.
-        //long rssi_ble = pClient ? pClient->getRssi() : -127; // with this line sth stopped working... so tried same in loop.
-        uint32_t mills = millis();
-        memcpy(pD,"RCVD",4); pD+=4;
-        memcpy(pD,pData,length); pD+=length;
-        *(pD++) = (uint8_t)(rssi_wifi&0xFF);
-        *(pD++) = (uint8_t)(rssi_ble&0xFF);
-        *(pD++) = (uint8_t)(nrWifiConnects&0xFF);
-        *(pD++) = (uint8_t)(nrBLEConnects&0xFF);
-        memcpy(pD,&mills,4); pD+=4;
-        size_t res = udp.writeTo(data, pD-data, remoteIP, remotePort);
-        Serial.print("UDP writeTo returned ");
-        Serial.println(res);
+    //preapre data for UDP frame.
+    if (remotePort != 0 && length < 32 && !bleStatusNew) {
+        tLastBLEStatusNotify = millis();
+        memcpy(bleStatus,pData,length);
+        bleStatusLen = length;
+        bleStatusNew = true;
     }
 }
 
@@ -84,6 +115,8 @@ class MyClientCallback : public BLEClientCallbacks {
     }
     pRemoteCharacteristicStatus = 0; //what about cleanup?? see above.
     pRemoteCharacteristicCmd = 0; //what about cleanup?? see above.
+    delete pRemoteDevice; // on disconnect, also force a scan (instead of just trying to reconnect)
+    pRemoteDevice = 0; //what about cleanup??
   }
 };
 
@@ -97,6 +130,11 @@ bool connectToServer() {
     Serial.println(" - Created client");
 
     pClient->setClientCallbacks(new MyClientCallback());
+    //17:11:33.982 -> Forming a connection to 44:17:93:5a:9d:3a
+    //17:11:33.982 ->  - Created client
+    // und dann passiert nix mehr... => fall fuer watchdog.
+    // bekanntes problem? https://github.com/nkolban/esp32-snippets/issues/874
+    //
 
     // Connect to the remove BLE Server.
     pClient->connect(pRemoteDevice);  // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
@@ -172,15 +210,15 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID)) {
 
       BLEDevice::getScan()->stop();
+      scanActive = false;
       pRemoteDevice = new BLEAdvertisedDevice(advertisedDevice);
 
     } // Found our server
   } // onResult
 }; // MyAdvertisedDeviceCallbacks
 
-
-
-bool BLEwriteCMD(uint8_t* data, size_t length) {
+bool BLEwriteCMD(uint8_t* data) {
+    size_t length = 4;
     Serial.println("BLEwriteCMD");
     if (pRemoteCharacteristicCmd) {
        pRemoteCharacteristicCmd->writeValue(data,length);
@@ -189,9 +227,8 @@ bool BLEwriteCMD(uint8_t* data, size_t length) {
     return false;
 }
 
-
-
 void onRcvd(AsyncUDPPacket& packet) {
+  bool res;
     Serial.print("UDP Packet Type: ");
     Serial.print(packet.isBroadcast()?"Broadcast":packet.isMulticast()?"Multicast":"Unicast");
     Serial.print(", From: ");
@@ -213,8 +250,11 @@ void onRcvd(AsyncUDPPacket& packet) {
     if (packet.length() >= 8 && memcmp(packet.data(), "SEND", 4) ==0) {
       remoteIP    = packet.remoteIP();
       remotePort  = packet.remotePort();
-      BLEwriteCMD(&packet.data()[4], 4);
-      Serial.println("CMD written");
+      memcpy(bleCmd, &packet.data()[4], 4);
+      bleCmdPending = true;
+//      res = BLEwriteCMD(&packet.data()[4], 4);
+//      Serial.print("CMD written");
+//      Serial.println(res?1:0);
     }
 }
 
@@ -231,6 +271,11 @@ void WiFiConnect() {
     }
 }
 
+void scanCompleteCB(BLEScanResults res) {
+  scanActive=false;
+  Serial.println("BLE Scan completed...");
+}
+
 void BLEstart() {
   // Retrieve a Scanner and set the callback we want to use to be informed when we
   // have detected a new device.  Specify that we want active scanning and start the
@@ -240,12 +285,34 @@ void BLEstart() {
   pBLEScan->setInterval(1349);
   pBLEScan->setWindow(449);
   pBLEScan->setActiveScan(true);
-  pBLEScan->start(5, false);
+  scanActive = true;
+  pBLEScan->start(5, &scanCompleteCB, false);
+  Serial.println("BLE Scan started...");
 }
 
 void setup()
 {
     Serial.begin(115200);
+    pinMode(LED_PWR, OUTPUT);
+    pinMode(LED_BT, OUTPUT);
+    pinMode(LED_WIFI, OUTPUT);
+    digitalWrite(LED_PWR, LOW);
+    digitalWrite(LED_BT,  LOW);
+    digitalWrite(LED_WIFI, LOW);
+    delay(1000);
+    digitalWrite(LED_PWR, HIGH);
+    delay(1000);
+    digitalWrite(LED_BT,  HIGH);
+    delay(1000);
+    digitalWrite(LED_WIFI, HIGH);
+    delay(1000);
+    digitalWrite(LED_BT,  LOW);
+    digitalWrite(LED_WIFI, LOW);
+
+    Serial.println("Configuring WDT...");
+    esp_task_wdt_init(WDT_TIMEOUT, true); //enable panic so ESP32 restarts
+    esp_task_wdt_add(NULL); //add current thread to WDT watch
+
     
     WiFi.persistent(false);   // daten nicht in Flash speichern - vermeintlicher default.
     WiFi.mode(WIFI_STA);
@@ -268,12 +335,17 @@ void loop()
       WiFiConnect();
     }
   
-    if (!pRemoteDevice) {
+    if (!scanActive && !pRemoteDevice) {
       BLEstart();
     }
     previousMillis = currentMillis;
   }
-
+//  if (pRemoteCharacteristicStatus && currentMillis - tLastBLEStatusNotify >=interval) {
+//    Serial.println("The BLE server seems connected but did not send notifies for too long..."); //probably the lld_pdu_get_tx_flush_nb HCI packet count mismatch thing...  did not work as expected so leave commented...
+//    pClient->disconnect();
+//    delay(300);
+//  }
+  
   if (pRemoteDevice && !pRemoteCharacteristicStatus) {
     if (connectToServer()) {
       Serial.println("We are now connected to the BLE Server.");
@@ -282,9 +354,26 @@ void loop()
     }
   }
 
-  rssi_ble = pClient ? pClient->getRssi() : -127;
+  // now transfered to main loop for easier debugging
+  if (bleCmdPending) {
+    if (BLEwriteCMD(bleCmd))
+      Serial.println("CMD written");
+    else
+      Serial.println("CMD write failed");
+    bleCmdPending = false;
+  }
+  if (bleStatusNew) {
+    sendUDPStatus();
+    bleStatusNew = false;
+  }
 
-  //no real work is done in loop
-  delay(1000);
+  digitalWrite(LED_BT,  pClient ? HIGH : LOW);
+  digitalWrite(LED_WIFI, WiFi.status() == WL_CONNECTED ? HIGH : LOW);
+
+  esp_task_wdt_reset();
+
+  delay(10);
     
 }
+
+
