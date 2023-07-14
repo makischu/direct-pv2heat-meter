@@ -11,6 +11,7 @@ describing IV-characteristic, including temperature dependency
 """
 
 from scipy.optimize import fsolve
+from scipy.interpolate import interp1d
 import numpy as np
 from numpy import exp
 import matplotlib.pyplot as plt
@@ -283,4 +284,133 @@ axs[1].grid()
 plt.show()
 
 
+
+
+
+#preparations for a simple when-to-switch-algorithm
+# aka finding the (temperature-dependent) power switching point
+def calc_Pser_Ppar_over_E(T=42.5):
+    Es = np.linspace(1,1000,1000)
+    Ppars = np.zeros(np.size(Es))
+    Psers = np.zeros(np.size(Es))
+    for i in range(0,len(Es)):
+        E = Es[i]
+        
+        #ermittle schnittpunkt für seriell
+        ILE, I0, b = moduleIcoeffs(TC=T,E=E)
+        nI = 1
+        nU = 6
+        def fI(vars):
+            U = vars
+            eq = nI* (ILE - I0*np.exp(b*U/nU)) - U/R
+            return eq
+        User =  fsolve(fI, nU*Umpp)
+        Iser = nI*moduleI(User/nU, TC=T,E=E)
+        Pser = User*Iser
+        Psers[i] = Pser
+        
+        #ermittle schnittpunkt für parallel
+        ILE, I0, b = moduleIcoeffs(TC=T,E=E)
+        nI = 2
+        nU = 3
+        def fI(vars):
+            U = vars
+            eq = nI* (ILE - I0*np.exp(b*U/nU)) - U/R
+            return eq
+        Upar =  fsolve(fI, nU*Umpp*1.2)
+        Ipar = nI*moduleI(Upar/nU, TC=T,E=E)
+        Ppar = Upar*Ipar
+        Ppars[i] = Ppar
+    return Ppars,Psers,Es
+        
+
+f, axs = plt.subplots(2,2)
+
+PointSer = 1.0
+PointPar = 1.2
+
+Ts = np.linspace(-10,60,3)
+for T in Ts:
+    Ppars,Psers,Es = calc_Pser_Ppar_over_E(T=T)
+    GainPar = Ppars/Psers
+    GainSer = Psers/Ppars
+    labelstr = str(T)+'°C '
+    
+    red = ((T-(-40.0))/100.0, 0,0)
+    blu = (0,0, (T-(-40.0))/100.0)
+
+    axsi = axs[0,0]
+    axsi.plot(Es, Psers, color=red, label=labelstr+"ser")
+    axsi.plot(Es, Ppars, color=blu, label=labelstr+"par")
+    axsi.grid()
+    axsi.legend()
+    axsi.set_xlabel("E")
+    axsi.set_ylabel("P")
+    axsi.set_xlim((0,1000))
+    axsi.set_ylim((0,1600))
+    axsi = axs[0,1]
+    axsi.plot(Ppars, Psers, color=red, label=labelstr+"ser=f(par)")
+    axsi.plot(Psers, Ppars, color=blu, label=labelstr+"par=f(ser)")
+    axsi.grid()
+    axsi.legend()
+    axsi.set_xlabel("P")
+    axsi.set_ylabel("P_alt")
+    axsi.set_xlim((0,1600))
+    axsi.set_ylim((0,1600))
+    axsi = axs[1,0]
+    axsi.plot(Psers, GainPar, color=blu, label='_'+labelstr+"par/sel")
+    axsi.plot(Ppars, GainSer, color=red, label='_'+labelstr+"ser/par")
+    axsi.grid()
+    axsi.set_xlabel("P")
+    axsi.set_ylabel("Gain_alt = P_alt/P")
+    axsi.set_xlim((0,750))
+    axsi.set_ylim((0,4.1))
+    
+    f = interp1d(GainSer, Ppars,kind='linear')
+    Pser11 = f(PointSer)
+    axsi.plot( [Pser11, Pser11], [0, PointSer], ':x', color=red, label="switching point to ser at "+labelstr)
+    f = interp1d(GainPar, Psers,kind='linear')
+    Ppar11 = f(PointPar)
+    axsi.plot( [Ppar11, Ppar11], [0, PointPar], ':+', color=blu, label="switching point to par at "+labelstr)
+    
+    axsi.legend(loc='upper right')
+    
+#plt.show()
+#f, axs = plt.subplots(1,1)
+
+Ts = np.linspace(-10,60,35)
+Ptopar = np.zeros(np.size(Ts))
+Ptoser = np.zeros(np.size(Ts))
+for i in range(0,len(Ts)):
+    T = Ts[i]
+    Ppars,Psers,Es = calc_Pser_Ppar_over_E(T=T)
+    GainPar = Ppars/Psers
+    GainSer = Psers/Ppars
+   
+    f = interp1d(GainSer, Ppars,kind='linear')
+    Pser11 = f(PointSer)
+    f = interp1d(GainPar, Psers,kind='linear')
+    Ppar11 = f(PointPar)
+    
+    Ptopar[i] = Ppar11
+    Ptoser[i] = Pser11
+    
+cSp_par, Sp0_par = np.polyfit(Ts, Ptopar, 1)
+cSp_ser, Sp0_ser = np.polyfit(Ts, Ptoser, 1)
+print(cSp_par,Sp0_par,cSp_ser,Sp0_ser) #-2.0454065023091434 326.69508523654144 -2.441312867329241 400.6715025641406
+#only for my source-load-combination
+fit_par = Sp0_par + Ts*cSp_par
+fit_ser = Sp0_ser + Ts*cSp_ser
+    
+axsi = axs[1,1]
+axsi.plot(Ts,Ptopar,'b:',label="switching point from ser to par")
+axsi.plot(Ts,Ptoser,'r:',label="switching point from par to ser")
+axsi.plot(Ts,fit_par,'b',label="switching point from ser to par, linear fit")
+axsi.plot(Ts,fit_ser,'r',label="switching point from par to ser, linear fit")
+axsi.grid()
+axsi.set_xlabel("T[C]")
+axsi.set_ylabel("P[W]")
+axsi.legend()
+    
+plt.show()
 

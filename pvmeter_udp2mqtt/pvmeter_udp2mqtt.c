@@ -82,9 +82,9 @@ struct __attribute__ ((packed)) Outputs {
   int16_t  IoutmA;
   uint16_t  U24mV;
   uint16_t  US1cV;
-  uint16_t  PwrAlttW;
-  uint16_t  a_inv_em9; //inverted, times e+9.
-  uint8_t   b_di2_em3; //divided/2, times e+3.
+  uint16_t  PwrAlttW;  //not used anymore. kept to avoid interface change.
+  uint16_t  a_inv_em9; //not used anymore. inverted, times e+9.
+  uint8_t   b_di2_em3; //not used anymore. divided/2, times e+3.
   uint8_t   LastReceivedCmdNr;
 }; //max 20 bytes.
 

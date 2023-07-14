@@ -32,68 +32,97 @@ signal.signal(signal.SIGINT, handler_stop_signals)
 signal.signal(signal.SIGTERM, handler_stop_signals)
 
 
-tE_s  = time()
-E_Ws  = 0.0
-E_day = dt.date.today()
+message_data = None 
+message_time = time()
 
 def on_message(client, userdata, message):
-    global tE_s
-    global E_Ws
-    global E_day
+    global message_data, message_time
     if message.topic == topicIn:
         try:  
             #avoid: json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1
             jmessage = message.payload[:-1].decode().replace(' ','').replace(',','","').replace(':','":""').replace('{','{"').replace('}','"}').replace('"""','"').replace('""','"')   
-            data = json.loads(jmessage)
-            
-            U = data['UoV']
-            I = data['IoA']
-            on =data['Sta'][-2]
-            ry =data['Sta'][-1]
-            TiC = data['TiC']
-            TeC = data['TeC']
-            
-            P = 0.0
-            if on == '1':
-                P = float(U)*float(I)
-                t_now = time()
-                deltat = t_now - tE_s
-                deltat = min([5.0,deltat])
-                E_Ws = E_Ws + P*deltat 
-                tE_s = t_now
-            
-            E_kWh = E_Ws / 3600.0 / 1000.0
-            
-            data_out = {'P_DC[W]':"{:.1f}".format(P), 
-                        'E_day[kWh]':"{:.3f}".format(E_kWh),
-                        'T_in[C]':TiC,
-                        'T_pv[C]':TeC,
-                        'highpowermode':ry,
-                        'outputon':on,
-                        'U_out[V]':U,
-                        'I_out[A]':I,
-                        }
-            
-            if E_day != dt.date.today():
-                E_day = dt.date.today()
-                E_Ws = 0.0
-            
-            clientLocal.publish(topicOut, json.dumps(data_out))
+            message_data = json.loads(jmessage)
+            message_time = time()
         except: 
-            print("ignoring some exception")
+            print("ignoring some exception") #ok, bad practise...
             pass
+
+
+tE_s  = time()
+E_Ws  = 0.0
+E_day = dt.date.today()
+publish_time = time()
+
+
+def do_publish(): 
+    global message_data, message_time, publish_time
+    global tE_s, E_Ws, E_day
+    data = message_data
+    
+    try:  
+        U = data['UoV']
+        I = data['IoA']
+        on =data['Sta'][-2]
+        ry =data['Sta'][-1]
+        TiC = data['TiC']
+        TeC = data['TeC']
         
+        P = 0.0
+        t_now = time()
+        if on == '1' and t_now - message_time < 10.0:
+            P = float(U)*float(I)
+            deltat = message_time - tE_s
+            deltat = min([5.0,deltat])
+            E_Ws = E_Ws + P*deltat 
+            tE_s = message_time
+        
+        E_kWh = E_Ws / 3600.0 / 1000.0
+        
+        data_out = {'P_DC[W]':"{:.1f}".format(P), 
+                    'E_day[kWh]':"{:.3f}".format(E_kWh),
+                    'T_in[C]':TiC,
+                    'T_pv[C]':TeC,
+                    'highpowermode':ry,
+                    'outputon':on,
+                    'U_out[V]':U,
+                    'I_out[A]':I,
+                    }
+        
+        if E_day != dt.date.today():
+            E_day = dt.date.today()
+            E_Ws = 0.0
+        
+        clientLocal.publish(topicOut, json.dumps(data_out))
+           
+    except: 
+        print("ignoring some exception") #ok, bad practise...
+        pass 
+    
+    publish_time = message_time
+    
 
 clientLocal.on_message = on_message;
 clientLocal.subscribe(topicIn)
 clientLocal.loop_start()
 
 while run:
-    try:
-        sleep(0.1)
-    except:
-        print("Unexpected error:", sys.exc_info()[0])
-        raise
-    sleep(0.1)    
+    # try:
+    #     sleep(0.1)
+    # except:
+    #     print("Unexpected error:", sys.exc_info()[0])
+    #     raise
+    sleep(0.1)  
+    #sleep(1.0 - (time() % 1.0))
+    tnow = time()
+    
+    # not a perfect synchronisation but sufficient for me.
+    
+    if message_time > publish_time:
+        do_publish()
+        
+    if message_time == publish_time and tnow > publish_time + 30:
+        do_publish()
+        
+        
 
 clientLocal.loop_stop()

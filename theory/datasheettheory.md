@@ -88,3 +88,11 @@ Some words on efficiency. When I started with this project I often found threads
 ![IVcharacteristicE](./IVcharacteristicE.png)
 
 This theory sais we can achieve more than 60% efficiency for a wide range of irradition, often much better. I don't think this is too bad, if you consider the simplicity of the circuitry. 
+
+![IVcharacteristicF](./IVcharacteristicF.png)
+
+Finally, I used these insights to simplify the decision for the microcontroller, when to switch from parallel to serial configuration and vise versa. Note that this solution is only valid for my panels, my load, and all the other assumptions made on this page. In this case the only remaining variable is temperature, and the decision is reduced to a comparison of (measured) power with a (temperaturedependent) threshold. This avoids the need for heavier math on the microcontroller (which in my case does not even offer a double precision unit...).
+
+Note that I chose to switch to serial configuration early, because of the high rise in gain for this direction, to reduce the effect of unideal models and measurement errors. As you can see in the left upper plot, the power in parallel configuration is almost constant from 200 to 1000 W/m2, while for serial configuration the power greatly increases. The leads to a great uncertainty when estimating [E and from that] the serial power from the parallel power. False not-switching to serial mode wastes a lot of power and efficiency, so this is the case we want to avoid.
+
+In contrast, I chose to switch to parallel configuration late, at more than 20% expected gain, because there is little to gain in absolute values and this way there is kind of an intrinsic hysteresis. 

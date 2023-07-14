@@ -84,15 +84,10 @@ struct Inputs {
 
 // states which are calculated/stored internally, including power logic.
 struct Internals {
-  float     a;
-  float     b;
-  float     c;
-  int       err_char;
   float     Inoload;
   float     Rload;
   uint32_t  t_Rload_set;
   float     PwrOutW;
-  float     PwrOutW_Alt;
   int       Errors;       //ERR_*
   int       PwrOutOk;     //OK_*
   uint8_t 	LastReceivedCmdNr;
@@ -117,9 +112,9 @@ struct __attribute__((packed)) Outputs {
   int16_t  IoutmA;
   uint16_t  U24mV;  // U24mV_atLastRelaisCmd at change of LastReceivedCmdNr
   uint16_t  US1cV;
-  uint16_t  PwrAlttW;
-  uint16_t  a_inv_em9; //inverted, times e+9.
-  uint8_t   b_di2_em3; //divided/2, times e+3.
+  uint16_t  __free__was_PwrAlttW;
+  uint16_t  __free__was_a_inv_em9; //inverted, times e+9.
+  uint8_t   __free__was_b_di2_em3; //divided/2, times e+3.
   uint8_t   LastReceivedCmdNr;
 }; //max 20bytes.
 
@@ -129,54 +124,17 @@ Outputs   output;
 
 
 
-// Math (see theory)
-#include <math.h>
-inline float f(float a,float b,float c, float R, float U) {
-    return a*exp(b*U)+c-U/R;
-}
-inline float df(float a,float b,float c, float R, float U) {
-    return a*b*exp(b*U)-1/R;
-}
-int intersectionStringsResistor(float* pU, float*pI, float a,float b,float c,int nPar,int nSer,float R) {
-  float Rstr = R*nPar/nSer;
-  float U=0,I=0;
-  float al=1;
-  int nEvals=20;
-  float y1,y2,U1,U2,dU1,st1;
-  *pU = -1; *pI = -1;
-  if(!(a<0 && b>0 && c>0))
-    return -1;
-  U = 0.9/b*log(-c/a);
-  y2 = 100;
-  while (nEvals>0) {
-    U1=U;
-    y1=f(a,b,c, Rstr, U1);
-    st1=df(a,b,c, Rstr, U1);
-    nEvals-=2;
-    if (abs(st1)<1e-9)
-        break;
-    dU1=-y1/st1;
-    while (nEvals>0) {
-      U2=U1+dU1*al;
-      y2=f(a,b,c, Rstr, U2);
-      nEvals-=1;
-      if (abs(y2)<abs(y1)) {
-        U=U2;
-        al*=2;
-        al=min(al, 1.0f);
-        break;
-      }
-      else
-        al/=2;
-    }
-    if (U==U2 && abs(U2-U1) < 1 && abs(y2)<0.1)
-      break;
-  }
-  I = U/Rstr;
-  I*=nPar;
-  U*=nSer;
-  *pU=U;*pI=I;
-  return 0;
+// Math (see theory). 
+// simplified and only valid for my configuration of source and load
+inline void getSwitchingPoints(float* pPtoSet, float* pPtoReset, float T_C) {
+  const float cSp_par = -2.045406502f;
+  const float Sp0_par = 326.6950852f;
+  const float cSp_ser = -2.44131286f;
+  const float Sp0_ser = 400.671502f;
+  float PtoSer = Sp0_ser + cSp_ser*T_C - 5.0f;
+  float PtoPar = Sp0_par + cSp_par*T_C;
+  if(pPtoSet)   *pPtoSet = PtoSer;
+  if(pPtoReset) *pPtoReset = PtoPar;
 }
 
 
@@ -421,7 +379,7 @@ const int latchPin = 4;
 const int clockPin = 5;
 //Pin connected to DS of 74HC595
 const int dataPin = 19;
-//TODO das stimmt mit dem redesign bestimmt auch nicht.. aber hier schon noch.
+
 
 //https://randomnerdtutorials.com/esp32-save-data-permanently-preferences/
 #include <Preferences.h>
@@ -688,37 +646,24 @@ void readInputs(){
 void interpretAndAct() {
   float U,I,R,P;
   bool Iexists;
-  int err,err_char;
-  float U_str=0,I_str=0,c=0;
-  float U_alt=0,I_alt=0,gain=0;
-  float U1=0,I1=0,U2=0,U2b=0,I2=0,U3=0,I3=0;
-  float T=0,a=0,b=0;
-  int nPar=0,nSer=0;
-  //uint32_t tstart,tend;
-  //tstart = millis();
+  int err;
+  float T=0;
   int PwrOutOk = 0;
   bool UVLOtriggered=false;
   int fetsRequested=0;
+  float PtoSet=0,PtoReset=0;
 
   //another option would be: use external temperature sensor as requestor (if temp < threshold).
   fetsRequested = input.DigIn1==1 || (intern.PowerOutOn_BT && millis()<intern.t_PowerOutOn_BT+70000);
   if(fetsRequested) PwrOutOk |= OK_REQUEST;
 
   U = input.UoutV;
-  I = input.IoutA;// ist jetzt schon korrigiert. - intern.Inoload;
+  I = input.IoutA;// already corrected
   Iexists = I>0.2;//heuristic, zero + offset + noise, avoid div0 
 
   if(input.TempExtcC != DEVICE_DISCONNECTED_RAW ) {
     T = input.TempExtcC/100.0f;
-    // values per panel, only valid for my situation, no general solution.
-    //
-    //
-    // to be developed. a=... b=...
-    //
-    //
-    // per string
-    //intern.a=a;
-    //intern.b=b/3;
+    getSwitchingPoints(&PtoSet, &PtoReset, T); // ask the main "intelligence"
   }
 
   // Current Power
@@ -751,28 +696,7 @@ void interpretAndAct() {
   if (intern.Errors == 0) {
     PwrOutOk |= OK_HW;
   }
-  
-  //Relais Switching Simulation
-  if (input.RelaisStatus == 0) {
-    nPar = 2; nSer = 1; //anders als bei V01/V02.
-  }else {
-    nPar = 1; nSer = 2;
-  }
-  if (input.FetStatus == 1 && Iexists && intern.PwrOutW > 0 && intern.Rload>0) {
-    U_str = U/nSer;
-    I_str = I/nPar;
-    c = I_str - intern.a*exp(intern.b*U_str);
-    //Serial.print("intersectionStringsResistor(");
-    err = intersectionStringsResistor(&U_alt, &I_alt, intern.a,intern.b, c, nSer, nPar, intern.Rload); //ser/par flipped
-    //Serial.println(")");
-    if (err==0) {
-      intern.PwrOutW_Alt = U_alt*I_alt;
-      gain = intern.PwrOutW_Alt/intern.PwrOutW-1;
-    } else {
-      intern.PwrOutW_Alt = 0;
-      gain = 0;
-    }
-  }
+
   
   //handle command
   uint8_t cmdNr = input.BleCmd[0];
@@ -831,33 +755,12 @@ void interpretAndAct() {
     if (UVLOtriggered && input.RelaisStatus == 1) {
       err = setRelais(0);
     }
-    else if (gain > 0.1 &&         // more than 10% more power expected
-        U_alt<250.0 &&        // do not switch if expected voltage after switching is too high
-        //!UVLOtriggered && sollte das nicht von gain abgedeckt sein?
-        (millis()-intern.t_LastRelaisAction)>2500)  // do not switch too often to protect the relais
-    {
-      if (input.FetStatus==1) {                         // fet must have been on, otherwiese value would not represent load.
-        U1 = input.UoutV;                               // values before switching the relais, under load.
-        I1 = input.IoutA;
+    else if ((millis()-intern.t_LastRelaisAction)>2500 && input.FetStatus==1) {
+      if (input.RelaisStatus == 0 && intern.PwrOutW > PtoSet) {
+        err = setRelais(1);
+      }else if (input.RelaisStatus == 1 && intern.PwrOutW < PtoReset) {
+        err = setRelais(0);
       }
-      err = setRelais(input.RelaisStatus?0:1,&U2,&I2);  // values before switching the relais, no load
-      if (err == 0 && PwrOutOk == OK_ALL) {
-        delay(ADC_SETTLING_TIME_MS); 
-        U2b = readVoltageOut();                         // values after switching the relais, no load
-        setFet(1);
-        delay(ADC_SETTLING_TIME_MS); 
-        if (readFetStatus()==1) {                       // fet must still be on, no uvlo must have triggered, otherwiese value would not represent load.
-          I3 = readCurrentCorrected();                  // values after switching the relais, under load
-          U3 = readVoltageOut();
-        }
-      }
-      err_char=3; 
-      //
-      //
-      // to be developped a=... b=...
-      //
-      //
-      intern.err_char = err_char;
     }
   }
   
@@ -888,8 +791,7 @@ void interpretAndAct() {
 
 // loop part 3
 void generateOutputs() {
-  uint16_t status=0; float ftmp; uint16_t status_err_bits;
-  status_err_bits = (uint16_t)(intern.err_char << 12);
+  uint16_t status=0; float ftmp; 
   if (input.RelaisStatus)       status |= STA_RELAIS_SET;
   if (input.FetStatus)          status |= STA_FET_ON; 
   if (intern.PwrOutOk!=OK_ALL)  status |= STA_INFO;
@@ -901,7 +803,6 @@ void generateOutputs() {
   if (intern.RelaisMode==0x05)  status |= STA_RELAIS_SET_FORCED;
   if (intern.RelaisMode==0x08)  status |= STA_RELAIS_RESET_FORCED;
   if (intern.fastAction)        status |= STA_FAST_OFF_ACTION;
-  status |= status_err_bits;
   output.Status = status;
   output.TempIntcC = input.TempIntcC;
   output.TempExtcC = input.TempExtcC;
@@ -909,11 +810,6 @@ void generateOutputs() {
   output.IoutmA = (int16_t)(input.IoutA*1000);
   output.U24mV  = input.U24mV;
   output.US1cV  = input.US1cV;
-  output.PwrAlttW = (uint16_t)(intern.PwrOutW_Alt*10);
-  ftmp = -intern.a*1e9;
-  output.a_inv_em9 = (uint16_t)(constrain(ftmp, 0, 65535));
-  ftmp = intern.b/2*1e3;
-  output.b_di2_em3 = (uint8_t)(constrain(ftmp, 0, 255));
   if (intern.relaisActionCount != intern.relaisActionCount_lastReported) { 
     output.U24mV = intern.U24mV_atLastRelaisCmd;
     intern.relaisActionCount_lastReported = intern.relaisActionCount;
@@ -945,8 +841,6 @@ void setup() {
   memset(&input, 0, sizeof(Inputs));
   memset(&intern, 0, sizeof(Internals));
   memset(&output, 0, sizeof(Outputs));
-  intern.a = -2.5e-7; // calculated start values for my pv config... not a general solution
-  intern.b = 0.14;
 
   pinMode(__PER_EN, OUTPUT);  digitalWrite(__PER_EN, HIGH); 
   pinMode(latchPin, OUTPUT);  digitalWrite(latchPin, HIGH); 
@@ -1144,7 +1038,7 @@ void setup() {
   preferences.end();
 
   // Create the BLE Device
-  BLEDevice::init("ESP32");
+  BLEDevice::init("ESP32pv");
 
   // Create the BLE Server
   pServer = BLEDevice::createServer();

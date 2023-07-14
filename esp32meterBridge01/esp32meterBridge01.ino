@@ -1,12 +1,14 @@
 //03.08.22 makischu as-is
 //part of direct-pv2heat-meter. bridge between BLE and Wifi.
 // based on https://github.com/espressif/arduino-esp32/blob/master/libraries/AsyncUDP/examples/AsyncUDPServer/AsyncUDPServer.ino
-// based on https://github.com/nkolban/ESP32_BLE_Arduino/tree/master/examples/BLE_client
+// initially based on https://github.com/nkolban/ESP32_BLE_Arduino/tree/master/examples/BLE_client 
+// later rewritten and moved to nimBLE https://github.com/h2zero/NimBLE-Arduino/blob/release/1.4/docs/New_user_guide.md#creating-a-client
+// or https://github.com/h2zero/NimBLE-Arduino/blob/release/1.4/examples/NimBLE_Client/NimBLE_Client.ino
 // deployed on a Firebeetle https://www.dfrobot.com/product-1590.html
 
 #include "WiFi.h"
 #include "AsyncUDP.h"
-#include "BLEDevice.h"
+#include "NimBLEDevice.h" //#include "BLEDevice.h"
 //For Watchdog example see https://iotassistant.io/esp32/enable-hardware-watchdog-timer-esp32-arduino-ide/
 #include <esp_task_wdt.h>
 
@@ -39,14 +41,15 @@ unsigned long tLastBLENotify=0;
 #define CHARACTERISTIC_STATUS_UUID  "2a201432-a3c9-4b7c-b3ed-24b72d7f9158"
 #define CHARACTERISTIC_CMD_UUID     "cf1ac9a7-87fe-400a-9bcf-a296dbc868c4"
 // The remote service we wish to connect to. & The characteristic of the remote service we are interested in.
-static BLEUUID    serviceUUID(SERVICE_UUID);
-static BLEUUID    charUUIDstatus(CHARACTERISTIC_STATUS_UUID);
-static BLEUUID    charUUIDcmd(CHARACTERISTIC_CMD_UUID);
+static NimBLEUUID    serviceUUID(SERVICE_UUID);
+static NimBLEUUID    charUUIDstatus(CHARACTERISTIC_STATUS_UUID);
+static NimBLEUUID    charUUIDcmd(CHARACTERISTIC_CMD_UUID);
 
-static BLEAdvertisedDevice*     pRemoteDevice=0;
-static BLERemoteCharacteristic* pRemoteCharacteristicStatus=0;
-static BLERemoteCharacteristic* pRemoteCharacteristicCmd=0;
-static BLEClient*               pClient =0;
+//static BLEAdvertisedDevice*     pRemoteDevice=0;
+static NimBLERemoteCharacteristic* pCharacteristicStatus=0;
+static NimBLERemoteCharacteristic* pCharacteristicCmd=0;
+static NimBLEClient*               pClient =0;
+int BLEwriteFails=0;
 long rssi_ble = -127;
 
 
@@ -58,7 +61,7 @@ size_t  bleStatusLen=0;
 bool    bleStatusNew=0;
 unsigned long tLastBLEStatusNotify=0;
 
-bool scanActive=false;
+
 
 void sendUDPStatus() {
     uint8_t data[64]; uint8_t* pD = data;
@@ -80,7 +83,7 @@ void sendUDPStatus() {
 }
 
 static void notifyCallback(
-  BLERemoteCharacteristic* pBLERemoteCharacteristic,
+  NimBLERemoteCharacteristic* pBLERemoteCharacteristic,
   uint8_t* pData,
   size_t length,
   bool isNotify) {
@@ -101,130 +104,92 @@ static void notifyCallback(
 }
 
 
-class MyClientCallback : public BLEClientCallbacks {
-  void onConnect(BLEClient* pclient) {
+
+void disconnectBLE() {
+  if (pClient) {
+    NimBLEDevice::deleteClient(pClient);
+    pClient = 0;
+    pCharacteristicStatus = 0;
+    pCharacteristicCmd = 0;
   }
-
-  void onDisconnect(BLEClient* pclient) {
-    Serial.println("onDisconnect");
-    //https://github.com/nkolban/esp32-snippets/issues/498
-    if (pClient!=0 && pClient==pclient) {
-      //pClient->disconnect();
-      //delete pClient;
-      pClient = 0;
-    }
-    pRemoteCharacteristicStatus = 0; //what about cleanup?? see above.
-    pRemoteCharacteristicCmd = 0; //what about cleanup?? see above.
-    delete pRemoteDevice; // on disconnect, also force a scan (instead of just trying to reconnect)
-    pRemoteDevice = 0; //what about cleanup??
-  }
-};
-
-bool connectToServer() {
-    if (!pRemoteDevice) return false;
-    
-    Serial.print("Forming a connection to ");
-    Serial.println(pRemoteDevice->getAddress().toString().c_str());
-    
-    pClient  = BLEDevice::createClient();
-    Serial.println(" - Created client");
-
-    pClient->setClientCallbacks(new MyClientCallback());
-    //17:11:33.982 -> Forming a connection to 44:17:93:5a:9d:3a
-    //17:11:33.982 ->  - Created client
-    // und dann passiert nix mehr... => fall fuer watchdog.
-    // bekanntes problem? https://github.com/nkolban/esp32-snippets/issues/874
-    //
-
-    // Connect to the remove BLE Server.
-    pClient->connect(pRemoteDevice);  // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
-    Serial.println(" - Connected to server");
-
-    // Obtain a reference to the service we are after in the remote BLE server.
-    BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
-    if (pRemoteService == nullptr) {
-      Serial.print("Failed to find our service UUID: ");
-      Serial.println(serviceUUID.toString().c_str());
-      pClient->disconnect();
-      return false;
-    }
-    Serial.println(" - Found our service");
-
-
-    // Obtain a reference to the characteristic in the service of the remote BLE server.
-    pRemoteCharacteristicStatus = pRemoteService->getCharacteristic(charUUIDstatus);
-    if (pRemoteCharacteristicStatus == nullptr) {
-      Serial.print("Failed to find our characteristic UUID: ");
-      Serial.println(charUUIDstatus.toString().c_str());
-      pClient->disconnect();
-      return false;
-    }
-    Serial.println(" - Found our characteristic");
-
-    if(pRemoteCharacteristicStatus->canNotify()) {
-      pRemoteCharacteristicStatus->registerForNotify(notifyCallback);
-    } else {
-      pClient->disconnect();
-      return false;
-    }
-      
-    Serial.println(" - canNotify ok");
-    
-    // Obtain a reference to the characteristic in the service of the remote BLE server.
-    pRemoteCharacteristicCmd = pRemoteService->getCharacteristic(charUUIDcmd);
-    if (pRemoteCharacteristicCmd == nullptr) {
-      Serial.print("Failed to find our characteristic UUID: ");
-      Serial.println(charUUIDcmd.toString().c_str());
-      pClient->disconnect();
-      return false;
-    }
-    Serial.println(" - Found our characteristic");
-
-    if(pRemoteCharacteristicCmd->canWrite()) {
-      uint8_t str[] = "HELLO";
-      pRemoteCharacteristicCmd->writeValue(str, sizeof(str));
-//      std::string value = pRemoteCharacteristic->readValue();
-//      Serial.print("The characteristic value was: ");
-//      Serial.println(value.c_str());
-    } else {
-      pClient->disconnect();
-      return false;
-    }
-    Serial.println(" - canWrite ok");
-
-    nrBLEConnects++;
-    return true;
 }
-/**
- * Scan for BLE servers and find the first one that advertises the service we are looking for.
- */
-class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
- /**
-   * Called for each advertising BLE server.
-   */
-  void onResult(BLEAdvertisedDevice advertisedDevice) {
-    Serial.print("BLE Advertised Device found: ");
-    Serial.println(advertisedDevice.toString().c_str());
 
-    // We have found a device, let us now see if it contains the service we are looking for.
-    if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID)) {
+// blocking call. kiss.
+void connectBLE() {
+  Serial.println("connectBLE start");
+  disconnectBLE();
 
-      BLEDevice::getScan()->stop();
-      scanActive = false;
-      pRemoteDevice = new BLEAdvertisedDevice(advertisedDevice);
+  NimBLEScan *pScan = NimBLEDevice::getScan();
+  NimBLEScanResults results = pScan->start(4);
+  bool subscribed = false;
+  
+  for(int i = 0; i < results.getCount(); i++) {
+    NimBLEAdvertisedDevice device = results.getDevice(i);
+    //Serial.print(device.getAddress().toString().c_str());
+    //Serial.println(device.getName().c_str());
+    
+    if (strcmp("ESP32pv",device.getName().c_str()) == 0) {
+    //if (device.isAdvertisingService(serviceUuid)) {
+      Serial.println("found ESP32pv");
+      pClient = NimBLEDevice::createClient();
 
-    } // Found our server
-  } // onResult
-}; // MyAdvertisedDeviceCallbacks
+      if (pClient->connect(&device)) {
+        //Serial.println("connected");
+        NimBLERemoteService *pService = pClient->getService(serviceUUID);
+        
+        if (pService != nullptr) {
+            //Serial.println("found service");
+            pCharacteristicStatus = pService->getCharacteristic(charUUIDstatus);
+            pCharacteristicCmd    = pService->getCharacteristic(charUUIDcmd);
+            
+            if (pCharacteristicStatus != nullptr) {
+              //Serial.println("got charac status");
+              // std::string value = pCharacteristic->readValue();
+              
+              if(pCharacteristicStatus->canNotify()) {
+                if(pCharacteristicStatus->subscribe(true, notifyCallback)) {
+                  subscribed = true;
+                  break;
+                }
+              }
+            }
+            if (pCharacteristicCmd != nullptr) {
+              //Serial.println("got charac cmd");
+            }
+        }
+      } else {
+        Serial.println("but failed to connect");
+      // failed to connect
+      }
+    }
+  }
+  if (pCharacteristicStatus == 0 || pCharacteristicCmd == 0 || subscribed == false) {
+    //Serial.println("but charac is missing.... deleting client.");
+    disconnectBLE();
+    Serial.println("connectBLE failed");
+  }
+  if (pClient) {
+    Serial.println("connectBLE success");
+    nrBLEConnects++;
+    BLEwriteFails=0;
+  }
+}
 
 bool BLEwriteCMD(uint8_t* data) {
-    size_t length = 4;
-    Serial.println("BLEwriteCMD");
-    if (pRemoteCharacteristicCmd) {
-       pRemoteCharacteristicCmd->writeValue(data,length);
-       return true;
-    }
-    return false;
+  bool wrote = false;
+  size_t length = 4;
+  Serial.println("BLEwriteCMD");
+  if (pCharacteristicCmd) {
+    wrote = pCharacteristicCmd->writeValue(data,length, true);
+    if (wrote  && BLEwriteFails>0)  BLEwriteFails--;
+    if (!wrote && BLEwriteFails<=9) BLEwriteFails++;
+  }
+  Serial.println(wrote ? "CMD written" : "CMD write failed");
+  return wrote;
+}
+
+bool BLEwriteFailedTooMuch() {
+  return BLEwriteFails >= 5;
 }
 
 void onRcvd(AsyncUDPPacket& packet) {
@@ -271,24 +236,6 @@ void WiFiConnect() {
     }
 }
 
-void scanCompleteCB(BLEScanResults res) {
-  scanActive=false;
-  Serial.println("BLE Scan completed...");
-}
-
-void BLEstart() {
-  // Retrieve a Scanner and set the callback we want to use to be informed when we
-  // have detected a new device.  Specify that we want active scanning and start the
-  // scan to run for 5 seconds.
-  BLEScan* pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setInterval(1349);
-  pBLEScan->setWindow(449);
-  pBLEScan->setActiveScan(true);
-  scanActive = true;
-  pBLEScan->start(5, &scanCompleteCB, false);
-  Serial.println("BLE Scan started...");
-}
 
 void setup()
 {
@@ -319,56 +266,49 @@ void setup()
     WiFi.config(ip,gw,sub);
     WiFiConnect();
 
-    BLEDevice::init("");
-    BLEstart();
+    NimBLEDevice::init("ESP32pvbr");
 }
 
 void loop()
 {
   //alle paar sekunden probiere ggf. neu mit Wifi und BLE zu verbinden.
   unsigned long currentMillis = millis();
+  bool BLEok = pClient != 0 && pClient->isConnected() && !BLEwriteFailedTooMuch() && currentMillis - tLastBLEStatusNotify <=interval;
+  bool WiFiok = WiFi.status() == WL_CONNECTED;
+  
+  digitalWrite(LED_BT,  BLEok ? HIGH : LOW);
+  digitalWrite(LED_WIFI, WiFiok ? HIGH : LOW);
+
   if (currentMillis - previousMillis >=interval) {
     // if WiFi is down, try reconnecting every CHECK_WIFI_TIME seconds
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!WiFiok) {
       Serial.print(currentMillis);
       Serial.println("Reconnecting to WiFi...");
       WiFiConnect();
     }
-  
-    if (!scanActive && !pRemoteDevice) {
-      BLEstart();
+
+    esp_task_wdt_reset();
+
+    if (!BLEok) {
+      Serial.println("Reconnecting to BLE...");
+      connectBLE();
     }
+  
     previousMillis = currentMillis;
   }
-//  if (pRemoteCharacteristicStatus && currentMillis - tLastBLEStatusNotify >=interval) {
-//    Serial.println("The BLE server seems connected but did not send notifies for too long..."); //probably the lld_pdu_get_tx_flush_nb HCI packet count mismatch thing...  did not work as expected so leave commented...
-//    pClient->disconnect();
-//    delay(300);
-//  }
-  
-  if (pRemoteDevice && !pRemoteCharacteristicStatus) {
-    if (connectToServer()) {
-      Serial.println("We are now connected to the BLE Server.");
-    } else {
-      Serial.println("We have failed to connect to the server; there is nothin more we will do.");
-    }
-  }
 
-  // now transfered to main loop for easier debugging
+  // sending out received messages on the other channel
+  // done in main loop (and main thread) for easier debugging
   if (bleCmdPending) {
-    if (BLEwriteCMD(bleCmd))
-      Serial.println("CMD written");
-    else
-      Serial.println("CMD write failed");
+    BLEwriteCMD(bleCmd);
     bleCmdPending = false;
+    digitalWrite(LED_WIFI, LOW);
   }
   if (bleStatusNew) {
     sendUDPStatus();
     bleStatusNew = false;
+    digitalWrite(LED_BT, LOW);
   }
-
-  digitalWrite(LED_BT,  pClient ? HIGH : LOW);
-  digitalWrite(LED_WIFI, WiFi.status() == WL_CONNECTED ? HIGH : LOW);
 
   esp_task_wdt_reset();
 
