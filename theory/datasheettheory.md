@@ -96,3 +96,9 @@ Finally, I used these insights to simplify the decision for the microcontroller,
 Note that I chose to switch to serial configuration early, because of the high rise in gain for this direction, to reduce the effect of unideal models and measurement errors. As you can see in the left upper plot, the power in parallel configuration is almost constant from 200 to 1000 W/m2, while for serial configuration the power greatly increases. The leads to a great uncertainty when estimating [E and from that] the serial power from the parallel power. False not-switching to serial mode wastes a lot of power and efficiency, so this is the case we want to avoid.
 
 In contrast, I chose to switch to parallel configuration late, at more than 20% expected gain, because there is little to gain in absolute values and this way there is kind of an intrinsic hysteresis. 
+
+Instead of P we can express the condition also for U and I (from P=U*I and R=U/I). Due to the assumed constant ohmic load, the conditions are equivalent. And one of them is sufficient. So we can omit the current measurement and just use voltage U (and temperature) as input for the switching logic.
+
+![IVcharacteristicG](./IVcharacteristicG.png)
+
+Summary: Despite the longish derivation, the result is quite simple. Only (1) voltage and temperature measurement are required to feed a simple microcontroller-suitable decision logic, capable to choose between parallel and serial configuration in order to optimise power output for a given situation/hardware.

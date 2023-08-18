@@ -412,5 +412,45 @@ axsi.set_xlabel("T[C]")
 axsi.set_ylabel("P[W]")
 axsi.legend()
     
-plt.show()
+#plt.show()
 
+
+f, axs = plt.subplots(1,2)
+#avoid usage of I/current, as its reading is noisy in my demonstrator, and in general more 'expensive' to measure than voltage/U
+Utopar = np.sqrt(Ptopar*R)
+Utoser = np.sqrt(Ptoser*R)
+Itopar = np.sqrt(Ptopar/R)
+Itoser = np.sqrt(Ptoser/R)
+
+cSp_par, Sp0_par = np.polyfit(Ts, Utopar, 1)
+cSp_ser, Sp0_ser = np.polyfit(Ts, Utoser, 1)
+print(cSp_par,Sp0_par,cSp_ser,Sp0_ser) #-0.36754060106676795 107.56084823287758 -0.39504819148813525 119.10965758956989
+#only for my source-load-combination
+fit_par = Sp0_par + Ts*cSp_par
+fit_ser = Sp0_ser + Ts*cSp_ser
+
+axsi = axs[0]
+axsi.fill_between(Ts,0,fit_par,facecolor=(0.5,0.5,1),label='switching area to parallel')
+axsi.fill_between(Ts,1000,fit_ser,facecolor=(1,0.5,0.5),label='switching area to serial')
+axsi.fill_between(Ts,fit_par,fit_ser,facecolor=(0.8,0.8,0.8),label='no action, keep previous state')
+axsi.plot(Ts,Utopar,'b:',label="switching point from ser to par")
+axsi.plot(Ts,Utoser,'r:',label="switching point from par to ser")
+axsi.plot(Ts,fit_par,'b',label="switching point from ser to par, linear fit")
+axsi.plot(Ts,fit_ser,'r',label="switching point from par to ser, linear fit")
+axsi.grid()
+axsi.set_xlabel("T[C]")
+axsi.set_ylabel("U[V]")
+axsi.set_xlim((-10,60))
+axsi.set_ylim((85,125))
+axsi.legend()
+axsi = axs[1]
+axsi.plot(Ts,Itopar,'b:',label="switching point from ser to par")
+axsi.plot(Ts,Itoser,'r:',label="switching point from par to ser")
+axsi.grid()
+axsi.set_xlabel("T[C]")
+axsi.set_ylabel("I[A]")
+axsi.set_xlim((-10,60))
+axsi.set_ylim((2.4,3.5))
+axsi.legend()
+    
+plt.show()

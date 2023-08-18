@@ -126,7 +126,7 @@ Outputs   output;
 
 // Math (see theory). 
 // simplified and only valid for my configuration of source and load
-inline void getSwitchingPoints(float* pPtoSet, float* pPtoReset, float T_C) {
+inline void getSwitchingPointsP(float* pPtoSet, float* pPtoReset, float T_C) {
   const float cSp_par = -2.045406502f;
   const float Sp0_par = 326.6950852f;
   const float cSp_ser = -2.44131286f;
@@ -135,6 +135,17 @@ inline void getSwitchingPoints(float* pPtoSet, float* pPtoReset, float T_C) {
   float PtoPar = Sp0_par + cSp_par*T_C;
   if(pPtoSet)   *pPtoSet = PtoSer;
   if(pPtoReset) *pPtoReset = PtoPar;
+}
+// simplified and only valid for my configuration of source and load
+inline void getSwitchingPointsU(float* pUtoSet, float* pUtoReset, float T_C) {
+  const float cSp_par = -0.36754060106676795f;
+  const float Sp0_par = 107.56084823287758f;
+  const float cSp_ser = -0.39504819148813525f;
+  const float Sp0_ser = 119.10965758956989f;
+  float UtoSer = Sp0_ser + cSp_ser*T_C;
+  float UtoPar = Sp0_par + cSp_par*T_C;
+  if(pUtoSet)   *pUtoSet = UtoSer;
+  if(pUtoReset) *pUtoReset = UtoPar;
 }
 
 
@@ -651,7 +662,7 @@ void interpretAndAct() {
   int PwrOutOk = 0;
   bool UVLOtriggered=false;
   int fetsRequested=0;
-  float PtoSet=0,PtoReset=0;
+  float UtoSet=0,UtoReset=0;
 
   //another option would be: use external temperature sensor as requestor (if temp < threshold).
   fetsRequested = input.DigIn1==1 || (intern.PowerOutOn_BT && millis()<intern.t_PowerOutOn_BT+70000);
@@ -663,7 +674,7 @@ void interpretAndAct() {
 
   if(input.TempExtcC != DEVICE_DISCONNECTED_RAW ) {
     T = input.TempExtcC/100.0f;
-    getSwitchingPoints(&PtoSet, &PtoReset, T); // ask the main "intelligence"
+    getSwitchingPointsU(&UtoSet, &UtoReset, T); // ask the main "intelligence"
   }
 
   // Current Power
@@ -756,9 +767,9 @@ void interpretAndAct() {
       err = setRelais(0);
     }
     else if ((millis()-intern.t_LastRelaisAction)>2500 && input.FetStatus==1) {
-      if (input.RelaisStatus == 0 && intern.PwrOutW > PtoSet) {
+      if (input.RelaisStatus == 0 && input.UoutV > UtoSet) { //intern.PwrOutW > PtoSet) {
         err = setRelais(1);
-      }else if (input.RelaisStatus == 1 && intern.PwrOutW < PtoReset) {
+      }else if (input.RelaisStatus == 1 && input.UoutV < UtoReset) { //intern.PwrOutW < PtoReset) {
         err = setRelais(0);
       }
     }
